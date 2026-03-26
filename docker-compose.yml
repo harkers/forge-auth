@@ -1,0 +1,116 @@
+# Authentik SSO - Docker Compose
+# Version: 2026.2.1 (pinned)
+# Phase 1: Core Deploy
+# Note: 2026.x releases no longer require Redis
+
+services:
+  postgresql:
+    image: docker.io/library/postgres:16-alpine
+    container_name: authentik-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-authentik}
+      POSTGRES_PASSWORD: ${PG_PASS:?Database password required}
+      POSTGRES_DB: ${PG_DB:-authentik}
+    volumes:
+      - authentik-db:/var/lib/postgresql/data
+    networks:
+      - authentik-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  server:
+    image: ghcr.io/goauthentik/server:2026.2.1
+    container_name: authentik-server
+    restart: unless-stopped
+    command: server
+    environment:
+      AUTHENTIK_SECRET_KEY: ${SECRET_KEY:?Secret key required}
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:?Database password required}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+      # Email settings (configure later)
+      AUTHENTIK_EMAIL__HOST: ${EMAIL_HOST:-}
+      AUTHENTIK_EMAIL__PORT: ${EMAIL_PORT:-587}
+      AUTHENTIK_EMAIL__USERNAME: ${EMAIL_USER:-}
+      AUTHENTIK_EMAIL__PASSWORD: ${EMAIL_PASS:-}
+      AUTHENTIK_EMAIL__USE_TLS: ${EMAIL_TLS:-true}
+      AUTHENTIK_EMAIL__FROM: ${EMAIL_FROM:-}
+    volumes:
+      - authentik-data:/data
+      - authentik-media:/media
+      - authentik-certs:/certs
+      - authentik-templates:/templates
+    networks:
+      - authentik-internal
+    ports:
+      # Internal only for Phase 1
+      - "127.0.0.1:9000:9000"  # HTTP (internal)
+      - "127.0.0.1:9443:9443"  # HTTPS (internal)
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/-/health/live/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      - "prometheus.io/scrape=true"
+      - "prometheus.io/port=9300"
+
+  worker:
+    image: ghcr.io/goauthentik/server:2026.2.1
+    container_name: authentik-worker
+    restart: unless-stopped
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: ${SECRET_KEY:?Secret key required}
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:?Database password required}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+    volumes:
+      - authentik-data:/data
+      - authentik-media:/media
+      - authentik-certs:/certs
+      - authentik-templates:/templates
+    networks:
+      - authentik-internal
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "ak", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "prometheus.io/scrape=true"
+      - "prometheus.io/port=9300"
+
+networks:
+  authentik-internal:
+    driver: bridge
+    internal: false  # Will expose via Nginx later
+
+volumes:
+  authentik-db:
+    driver: local
+  authentik-data:
+    driver: local
+  authentik-media:
+    driver: local
+  authentik-certs:
+    driver: local
+  authentik-templates:
+    driver: local

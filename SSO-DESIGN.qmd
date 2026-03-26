@@ -1,0 +1,450 @@
+---
+title: "Home Lab SSO - Design Document"
+format:
+  html:
+    toc: true
+    code-fold: true
+---
+
+# Overview
+
+**Goal:** Deploy a self-hosted Single Sign-On (SSO) server to secure home lab services with centralized authentication.
+
+**Host:** Titan (192.168.10.80)
+
+## Recommended Solution: Authentik
+
+| Criteria | Authentik | Authelia | Keycloak |
+|----------|-----------|----------|----------|
+| Ease of Setup | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ |
+| Features | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| Resources | Medium | Low | High |
+| UI/UX | Modern | Minimal | Enterprise |
+| Home Lab Fit | Excellent | Excellent | Overkill |
+
+**Recommendation:** Authentik for rich features + good UX, or Authelia for minimal footprint.
+
+---
+
+# Architecture
+
+```
+                    ┌─────────────────────────────────────┐
+                    │           Internet                  │
+                    └─────────────────┬───────────────────┘
+                                      │
+                    ┌─────────────────▼───────────────────┐
+                    │      Cloudflare Tunnel / VPN        │
+                    │         (or direct HTTPS)           │
+                    └─────────────────┬───────────────────┘
+                                      │
+                    ┌─────────────────▼───────────────────┐
+                    │         Reverse Proxy               │
+                    │      (Nginx / Traefik / Caddy)      │
+                    └─────────────────┬───────────────────┘
+                                      │
+            ┌─────────────────────────┼─────────────────────────┐
+            │                         │                         │
+   ┌────────▼────────┐      ┌────────▼────────┐      ┌────────▼────────┐
+   │   Authentik     │      │   Protected     │      │   Protected     │
+   │   (SSO Server)  │      │   Service A     │      │   Service B     │
+   │   Port: 9000    │      │   (ForgeDeck)   │      │   (Grafana)     │
+   │   Port: 9443    │      │                 │      │                 │
+   └─────────────────┘      └─────────────────┘      └─────────────────┘
+            │
+   ┌────────▼────────┐
+   │   PostgreSQL    │
+   │   (Authentik DB)│
+   └─────────────────┘
+```
+
+## Key Components
+
+| Component | Purpose | Port |
+|-----------|---------|------|
+| Authentik Server | Core SSO (UI + API) | 9000 (HTTP), 9443 (HTTPS) |
+| Authentik Worker | Background tasks | Internal |
+| PostgreSQL | User/config storage | 5432 |
+| Redis | Cache/sessions | 6379 |
+| Reverse Proxy | TLS termination, routing | 80/443 |
+
+---
+
+# Integration Points
+
+## Services to Protect (Candidate List)
+
+From your existing infrastructure:
+
+| Service | Current Auth | Integration Method |
+|---------|--------------|-------------------|
+| Forge Pipeline | None | OAuth2 / Proxy Auth |
+| ForgeDeck | None | OAuth2 / Proxy Auth |
+| Trilium Notes | Token-based | LDAP / OAuth2 |
+| Docker Services | Varied | Forward Auth |
+| OpenClaw Gateway | API keys | OAuth2 client credentials |
+
+## Authentication Flow
+
+```
+1. User visits https://forge.titan.local
+2. Reverse proxy checks with Authentik (forward auth)
+3. If unauthenticated → redirect to Authentik login
+4. User authenticates (password / 2FA / OIDC provider)
+5. Authentik issues token → proxy allows access
+6. User redirected back to original service
+```
+
+---
+
+# Phase Plan
+
+## Phase 1: Core Deployment (Day 1-2)
+
+**Goal:** Get Authentik running with basic user authentication.
+
+### Tasks
+
+- [ ] Create Docker Compose for Authentik stack
+- [ ] Configure PostgreSQL database
+- [ ] Set up Redis for caching
+- [ ] Initialize Authentik server + worker
+- [ ] Create first admin user
+- [ ] Verify login works at `https://auth.titan.local`
+
+### Deliverables
+
+```yaml
+# docker-compose.authentik.yml
+services:
+  postgresql:
+    image: docker.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASS}
+      POSTGRES_USER: ${PG_USER:-authentik}
+      POSTGRES_DB: ${PG_DB:-authentik}
+    volumes:
+      - ./database:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: docker.io/library/redis:alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  server:
+    image: ghcr.io/goauthentik/server:2024.10
+    command: server
+    environment:
+      AUTHENTIK_SECRET_KEY: ${SECRET_KEY}
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_REDIS__PASSWORD: ${REDIS_PASS}
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+    volumes:
+      - ./media:/media
+      - ./custom-templates:/templates
+    ports:
+      - "9000:9000"
+      - "9443:9443"
+    restart: unless-stopped
+    depends_on:
+      - postgresql
+      - redis
+
+  worker:
+    image: ghcr.io/goauthentik/server:2024.10
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: ${SECRET_KEY}
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_REDIS__PASSWORD: ${REDIS_PASS}
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+    volumes:
+      - ./media:/media
+      - ./custom-templates:/templates
+      - ./certs:/certs
+    restart: unless-stopped
+    depends_on:
+      - postgresql
+      - redis
+```
+
+### Verification
+
+```bash
+# Check containers
+docker compose -f docker-compose.authentik.yml ps
+
+# Access UI
+open https://auth.titan.local:9443/if/flow/initial-setup/
+```
+
+---
+
+## Phase 2: Reverse Proxy Integration (Day 2-3)
+
+**Goal:** Put Authentik behind proper reverse proxy with TLS.
+
+### Tasks
+
+- [ ] Create DNS entries for `auth.titan.local` and protected services
+- [ ] Configure Nginx reverse proxy for Authentik
+- [ ] Set up TLS certificates (Let's Encrypt / self-signed / existing)
+- [ ] Configure forward auth endpoint
+- [ ] Test authentication flow through proxy
+
+### Nginx Forward Auth Configuration
+
+```nginx
+# Forward auth location for protected services
+location @authentik {
+    internal;
+    proxy_pass http://192.168.10.80:9443/outpost.goauthentik.io/auth/nginx;
+    proxy_pass_request_body off;
+    proxy_set_header Host $host;
+    proxy_set_header X-Original-URL $scheme://$http_host$request_uri;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Content-Length "";
+    proxy_set_header X-Real-IP $remote_addr;
+}
+
+# Protected service example
+server {
+    server_name forge.titan.local;
+    
+    location / {
+        auth_request /outpost.goauthentik.io/auth/nginx;
+        auth_request_set $user $upstream_http_x_authentik_username;
+        auth_request_set $groups $upstream_http_x_authentik_groups;
+        
+        # Redirect to Authentik if not authenticated
+        error_page 401 = @authentik_signin;
+        
+        proxy_pass http://192.168.10.80:4174;
+        proxy_set_header X-Authentik-Username $user;
+        proxy_set_header X-Authentik-Groups $groups;
+    }
+    
+    location /outpost.goauthentik.io {
+        proxy_pass http://192.168.10.80:9443;
+    }
+    
+    location @authentik_signin {
+        internal;
+        return 302 https://auth.titan.local/outpost.goauthentik.io/start?rd=$scheme://$http_host$request_uri;
+    }
+}
+```
+
+---
+
+## Phase 3: Application Integration (Day 3-5)
+
+**Goal:** Protect first service with SSO.
+
+### Tasks
+
+- [ ] Create Authentik application for Forge Pipeline
+- [ ] Configure OAuth2/OIDC provider
+- [ ] Create user groups (admin, user)
+- [ ] Set up authentication policies
+- [ ] Test login flow end-to-end
+
+### Authentik Application Setup
+
+1. **Create Provider:**
+   - Type: OAuth2/OpenID Connect
+   - Name: `forge-pipeline-provider`
+   - Authorization flow: `default-authentication-flow`
+   - Client ID: auto-generated
+   - Client Secret: auto-generated
+   - Redirect URIs: `https://forge.titan.local/*`
+
+2. **Create Application:**
+   - Name: `Forge Pipeline`
+   - Slug: `forge-pipeline`
+   - Provider: `forge-pipeline-provider`
+   - Policy engine mode: `any`
+
+3. **Create Groups:**
+   - `admins` - Full access
+   - `users` - Read access
+
+4. **Bind Policies:**
+   - Group membership required
+   - Optional: MFA required for admins
+
+---
+
+## Phase 4: Advanced Features (Day 5-7)
+
+**Goal:** Add security enhancements and additional integrations.
+
+### Tasks
+
+- [ ] Configure MFA (TOTP/WebAuthn)
+- [ ] Set up LDAP for legacy apps (Trilium)
+- [ ] Create backup/restore procedure
+- [ ] Configure rate limiting
+- [ ] Set up email notifications (optional)
+
+### MFA Configuration
+
+```yaml
+# In Authentik Admin UI:
+# Flows → Stage bindings → Add TOTP stage
+# Authentication flow → Add MFA verification stage
+# Group policies: Require MFA for 'admins'
+```
+
+### LDAP Outpost (for Trilium)
+
+```yaml
+services:
+  ldap:
+    image: ghcr.io/goauthentik/ldap:2024.10
+    command: server
+    environment:
+      AUTHENTIK_SECRET_KEY: ${SECRET_KEY}
+      AUTHENTIK_URL: http://server:9000
+    ports:
+      - "389:3389"   # LDAP
+      - "636:3636"   # LDAPS
+    restart: unless-stopped
+```
+
+---
+
+## Phase 5: Production Hardening (Day 7-10)
+
+**Goal:** Secure and optimize for production use.
+
+### Tasks
+
+- [ ] Review and rotate all secrets
+- [ ] Configure automated backups
+- [ ] Set up monitoring (Grafana integration)
+- [ ] Document recovery procedures
+- [ ] Security audit (port scan, auth testing)
+- [ ] Configure session timeouts
+
+### Backup Script
+
+```bash
+#!/bin/bash
+# backup-authentik.sh
+DATE=$(date +%Y%m%d_%H%M%S)
+BACKUP_DIR=/backup/authentik
+
+# Database backup
+docker exec authentik-postgresql pg_dump -U authentik authentik > "$BACKUP_DIR/db_$DATE.sql"
+
+# Media/config backup
+tar -czf "$BACKUP_DIR/media_$DATE.tar.gz" ./media ./custom-templates
+
+# Retention (7 days)
+find "$BACKUP_DIR" -type f -mtime +7 -delete
+```
+
+### Monitoring Integration
+
+Add Authentik metrics to Grafana:
+
+```yaml
+# Prometheus scrape config
+- job_name: 'authentik'
+  static_configs:
+    - targets: ['authentik-server:9300']
+  metrics_path: /metrics
+```
+
+---
+
+# Resource Requirements
+
+| Component | CPU | RAM | Storage |
+|-----------|-----|-----|---------|
+| Authentik Server | 0.5 core | 512MB | 1GB |
+| Authentik Worker | 0.25 core | 256MB | - |
+| PostgreSQL | 0.5 core | 256MB | 5GB |
+| Redis | 0.1 core | 64MB | - |
+| **Total** | ~1.5 cores | ~1GB | ~6GB |
+
+---
+
+# Security Considerations
+
+## Attack Surface
+
+| Risk | Mitigation |
+|------|------------|
+| Brute force login | Rate limiting + fail2ban |
+| Session hijacking | HTTPS only, secure cookies |
+| Credential theft | MFA mandatory for admins |
+| Data breach | Encrypted database backups |
+| Insider threat | Audit logging enabled |
+
+## Best Practices
+
+1. **Never expose Authentik directly** - always use reverse proxy
+2. **Use strong secrets** - 32+ character random strings
+3. **Enable MFA** - at minimum for admin accounts
+4. **Regular backups** - database + media volumes
+5. **Monitor logs** - failed login attempts, policy violations
+6. **Separate networks** - auth tier separate from app tier (optional)
+
+---
+
+# Next Steps
+
+1. **Confirm preferences:**
+   - Authentik or Authelia?
+   - Which services to protect first?
+   - Existing reverse proxy or new deployment?
+
+2. **Prepare infrastructure:**
+   - DNS entries needed
+   - TLS certificate source
+   - Backup storage location
+
+3. **Start Phase 1 deployment**
+
+---
+
+# Appendix: Alternative - Authelia (Lightweight Option)
+
+If you prefer minimal footprint:
+
+```yaml
+services:
+  authelia:
+    image: docker.io/authelia/authelia:latest
+    container_name: authelia
+    volumes:
+      - ./config:/config
+    environment:
+      - TZ=Europe/London
+    ports:
+      - "9091:9091"
+    restart: unless-stopped
+```
+
+Authelia uses YAML config file instead of web UI. Good for:
+- Simple setups
+- Low resource environments
+- GitOps-managed configurations

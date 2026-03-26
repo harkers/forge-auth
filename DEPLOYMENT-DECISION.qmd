@@ -1,0 +1,138 @@
+---
+title: "Authentik Deployment Decision Note"
+format: html
+---
+
+# Phase 0 — Design Lock
+
+**Date:** 2026-03-26  
+**Status:** Locked for implementation
+
+## Core Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Reverse Proxy | Nginx (existing) | Already deployed, stable |
+| Identity Core | Authentik server + worker + PostgreSQL | No Redis needed in current releases |
+| First Protected App | Trilium Notes | Low blast radius, recoverable |
+| Auth Method Priority | OIDC/OAuth2 first, proxy provider second | Cleaner modern path |
+| Version Tag | `ghcr.io/goauthentik/server:2024.12.3` | Pinned, not floating |
+| Outpost Strategy | Embedded initially | Simpler deployment, separate later if needed |
+
+## FQDNs and Ports
+
+| Service | Internal | External | Port |
+|---------|----------|----------|------|
+| Authentik Server | `authentik-server` | `auth.titan.local` | 9000 (HTTP), 9443 (HTTPS) |
+| Authentik Worker | `authentik-worker` | N/A | Internal |
+| PostgreSQL | `authentik-postgres` | N/A | 5432 |
+| Trilium (first app) | `trilium` | `notes.titan.local` | 8080 |
+
+## External Access Path
+
+```
+Cloudflare/Tailscale → Nginx (TLS termination) → Authentik → Protected Apps
+```
+
+## Data Paths
+
+| Path | Purpose | Volume |
+|------|---------|--------|
+| `/var/lib/authentik/data` | Authentik core data | `authentik-data` |
+| `/var/lib/authentik/media` | User uploads, icons | `authentik-media` |
+| `/var/lib/authentik/certs` | Custom certificates | `authentik-certs` |
+| `/var/lib/postgresql/data` | Database | `authentik-db` |
+| `/var/lib/authentik/templates` | Custom templates | `authentik-templates` |
+
+## Resource Allocation
+
+| Component | CPU | RAM |
+|-----------|-----|-----|
+| Authentik Server | 1 core | 1 GB |
+| Authentik Worker | 0.5 core | 512 MB |
+| PostgreSQL | 0.5 core | 512 MB |
+| **Total Reserved** | 2 cores | 2 GB |
+
+## Secret Management
+
+| Secret | Storage | Rotation Policy |
+|--------|---------|-----------------|
+| `AUTHENTIK_SECRET_KEY` | Docker secrets / `.env` | On compromise only |
+| `POSTGRES_PASSWORD` | Docker secrets / `.env` | On compromise only |
+| `POSTGRES_USER` | Docker secrets / `.env` | Static |
+
+## Network Strategy
+
+- **Phase 1-2:** Internal Docker network only
+- **Phase 3+:** Expose via Nginx with proper TLS
+- **Outpost Network:** Same Docker network (embedded outpost)
+
+## Version Pin
+
+```yaml
+# Locked version - DO NOT USE :latest
+AUTHENTIK_IMAGE: ghcr.io/goauthentik/server:2024.12.3
+POSTGRES_IMAGE: docker.io/library/postgres:16-alpine
+```
+
+## Required Nginx Headers
+
+```nginx
+proxy_set_header Host $host;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Real-IP $remote_addr;
+
+# WebSocket support (REQUIRED for Authentik)
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+```
+
+## Rollback Strategy
+
+1. **Database backup** before any upgrade
+2. **No downgrade support** - must restore from backup
+3. **Outpost versions** must match server version
+
+## Acceptance Gates
+
+### Phase 1 (Core Deploy)
+- [ ] Server container healthy
+- [ ] Worker container healthy  
+- [ ] PostgreSQL reachable
+- [ ] Admin login works locally
+- [ ] `/health/ready` returns 200
+
+### Phase 2 (Proxy + TLS)
+- [ ] Authentik UI loads through Nginx over TLS
+- [ ] No redirect loops
+- [ ] WebSocket connections work
+- [ ] Client IPs visible in Authentik logs
+
+### Phase 3 (Identity Baseline)
+- [ ] Admin group created
+- [ ] User group created
+- [ ] Break-glass admin account ready
+- [ ] MFA enforced for admins
+- [ ] Email delivery tested
+
+### Phase 4 (First App)
+- [ ] Trilium protected by Authentik
+- [ ] Unauthenticated → redirect to Authentik
+- [ ] Authenticated → lands in Trilium
+- [ ] Group-based authorization works
+
+---
+
+## Runbooks to Create
+
+1. **backup-restore.md** — Database + data backup/restore
+2. **upgrade.md** — Version upgrade procedure
+3. **break-glass.md** — Emergency admin access
+4. **app-onboarding.md** — Adding new protected apps
+
+---
+
+**Locked by:** Design decision finalized  
+**Next Step:** Phase 1 implementation
