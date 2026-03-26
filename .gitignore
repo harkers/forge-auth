@@ -2,3 +2,5 @@
 *.sql
 *.tar.gz
 backup_*.sql
+# Tunnel token (contains secret)
+cloudflared/docker-compose.yml
