@@ -1,0 +1,28 @@
+# Trilium Notes with OAuth2/SSO
+# Paired with Authentik SSO
+
+services:
+  trilium:
+    image: ghcr.io/triliumnext/trilium:latest
+    container_name: trilium
+    restart: unless-stopped
+    environment:
+      # Disable TLS verification for self-signed certs (remove in production with proper certs)
+      - NODE_TLS_REJECT_UNAUTHORIZED=0
+      # OAuth2 configuration - Trilium's own URL
+      - TRILIUM_OAUTH_BASE_URL=https://notes.harker.systems
+      # Authentik issuer configuration
+      - TRILIUM_OAUTH_ISSUER_BASE_URL=https://auth.titan.lan/application/o/trilium/
+      - TRILIUM_OAUTH_ISSUER_NAME=Authentik
+      - TRILIUM_OAUTH_CLIENT_ID=93DDPoE1MXQioAaSXWDhgfcEIlYFlG42eJ8eecpD
+      - TRILIUM_OAUTH_CLIENT_SECRET=gGBB6Hp0Lrj3vPuHOTg09z0SbqbBpf3w1apw4T0MQuSlGMSxhy58uDh84BT1gakYaswbiBerHsuTHftfXw7uYMK63Q0FsQOjGj8j1ctNkeYm6CzHByQ4pIwl6qAljWuL
+    volumes:
+      - ./data:/home/node/trilium-data
+    ports:
+      - "127.0.0.1:8082:8080"
+    networks:
+      - trilium-internal
+
+networks:
+  trilium-internal:
+    driver: bridge

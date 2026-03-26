@@ -160,12 +160,39 @@ docker compose up -d
 
 ```
 forge-auth/
-├── docker-compose.yml    # Main deployment
+├── docker-compose.yml    # Authentik deployment
 ├── .env.example          # Environment template
+├── nginx/
+│   └── authentik.conf    # Nginx reverse proxy config
+├── trilium/
+│   ├── docker-compose.yml    # Trilium deployment
+│   └── config.ini.example    # Trilium OAuth config template
 ├── SSO-DESIGN.qmd        # Full design document
 ├── DEPLOYMENT-DECISION.qmd # Phase 0 decisions
 └── README.md             # This file
 ```
+
+## Protected Apps
+
+### Trilium Notes (OAuth2)
+
+First protected app, migrated from LXC to Docker.
+
+**Deploy:**
+```bash
+cd trilium
+# Copy config template
+cp config.ini.example data/config.ini
+# Edit data/config.ini with your OAuth credentials
+docker compose up -d
+```
+
+**Nginx config:** See `nginx/trilium.conf`
+
+### Adding More Apps
+
+1. **OIDC/OAuth2 apps:** Create OAuth2 provider in Authentik, configure app with credentials
+2. **Non-OAuth apps:** Use Proxy Provider with embedded outpost
 
 ## Resources
 

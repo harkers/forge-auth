@@ -1,0 +1,26 @@
+# Trilium Notes config.ini
+# Copy to data/config.ini and update values
+
+[General]
+instanceName=
+noAuthentication=false
+noBackup=false
+
+[Network]
+port=8080
+https=false
+certPath=
+keyPath=
+# Trust reverse proxy (Nginx)
+trustedReverseProxy=true
+
+[OAuth]
+# Trilium's own URL (external-facing)
+oauthBaseUrl=https://notes.harker.systems
+# Authentik issuer URL
+oauthIssuerBaseUrl=https://auth.titan.lan/application/o/trilium/
+# Display name on login button
+oauthIssuerName=Authentik
+# OAuth client credentials (from Authentik)
+oauthClientId=YOUR_CLIENT_ID
+oauthClientSecret=YOUR_CLIENT_SECRET
